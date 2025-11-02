@@ -6,110 +6,47 @@ use std::fmt::Debug;
 pub type Core = usize;
 pub type GB = usize;
 pub type JobId = u64;
-pub trait Shared:
-    PartialOrd
-    + PartialEq
-    + Ord
-    + Eq
-    + Clone
-    + Sized
-    + Debug
-    + From<usize>
-    + Into<usize>
-    + std::convert::From<f32>
-    + Into<f32>
-{
-}
-impl<T> Shared for T where
-    T: PartialOrd
-        + PartialEq
-        + Ord
-        + std::convert::From<f32>
-        + Eq
-        + Sized
-        + Clone
-        + Debug
-        + From<usize>
-        + Into<usize>
-        + Into<f32>
-{
-}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResourceType<S: Shared> {
-    CPU(S),
-    RAM(S),
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResourceType {
+    CPU,
+    RAM,
 }
-
-impl<R: Shared> PartialOrd for ResourceType<R> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl<R: Shared> Ord for ResourceType<R> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (ResourceType::CPU(a), ResourceType::CPU(b)) => a.cmp(b),
-            (ResourceType::RAM(a), ResourceType::RAM(b)) => a.cmp(b),
-            (ResourceType::CPU(_), ResourceType::RAM(_)) => Ordering::Less,
-            (ResourceType::RAM(_), ResourceType::CPU(_)) => Ordering::Greater,
-        }
-    }
-}
-#[derive(Clone, Debug, PartialOrd, Ord, Eq)]
-pub struct DominantShare<S: Shared> {
+#[derive(Clone, Debug)]
+pub struct DominantShare {
     job_id: JobId,
-    resource_type: ResourceType<S>,
-    resource_share: S,
+    resource_type: ResourceType,
+    resource_share: f32,
 }
-impl<S: Shared> PartialEq for DominantShare<S> {
+impl PartialEq for DominantShare {
     fn eq(&self, other: &Self) -> bool {
         self.resource_share == other.resource_share
     }
 }
-impl<S: Shared> DominantShare<S> {
-    fn from(job_id: JobId, resource_type: ResourceType<S>, resource_share: S) -> Self {
-        DominantShare {
-            job_id,
-            resource_type,
-            resource_share,
-        }
+impl PartialOrd for DominantShare {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.resource_share.partial_cmp(&other.resource_share)
     }
 }
-
 #[derive(Clone, Debug)]
-pub struct Resource<S: Shared> {
-    resource_type: ResourceType<S>,
+pub struct Resource {
+    cpu: Core,
+    mem: GB,
 }
 
-impl<S: Shared> Resource<S> {
-    fn get_cpu(&self) -> usize {
-        match &self.resource_type {
-            ResourceType::CPU(cpu) => cpu.clone().into(),
-            ResourceType::RAM(_) => S::from(0).into(),
-        }
-    }
-    fn get_ram(&self) -> usize {
-        match &self.resource_type {
-            ResourceType::RAM(ram) => ram.clone().into(),
-            ResourceType::CPU(_) => S::from(0).into(),
-        }
-    }
-}
-
-pub struct Task<Args: Clone, R, S: Shared> {
+pub struct Task<Args: Clone, R> {
     name: &'static str,
-    resource_demand: Resource<S>,
+    resource_demand: Resource,
     args: Args,
     trigger: Box<dyn Fn(Args) -> R>,
 }
 
-pub trait TaskTrait<S: Shared>: Debug {
+pub trait TaskTrait: Debug {
     fn run(&mut self);
-    fn get_resource_demand(&self) -> Resource<S>;
+    fn get_resource_demand(&self) -> Resource;
 }
 
-impl<Args, R, S: Shared> TaskTrait<S> for Task<Args, R, S>
+impl<Args, R> TaskTrait for Task<Args, R>
 where
     Args: 'static + Clone + Debug,
     R: 'static,
@@ -118,13 +55,13 @@ where
         let args = self.args.clone();
         (self.trigger)(args);
     }
-    fn get_resource_demand(&self) -> Resource<S> {
+    fn get_resource_demand(&self) -> Resource {
         self.resource_demand.clone()
     }
 }
 
 // #[derive(Debug)]
-pub struct Job<S: Shared> {
+pub struct Job {
     id: JobId,
     tasks_run: i32,
     total_cpu: Core,
@@ -132,11 +69,11 @@ pub struct Job<S: Shared> {
     cpu_usage: Core,
     ram_usage: GB,
     completed: bool,
-    dominant_share: DominantShare<S>,
-    tasks: VecDeque<Box<dyn TaskTrait<S>>>,
+    dominant_share: DominantShare,
+    tasks: VecDeque<Box<dyn TaskTrait>>,
 }
 
-impl<S: Shared> Job<S> {
+impl Job {
     fn new(id: JobId, total_cpu: Core, total_memory: GB) -> Self {
         Job {
             id,
@@ -150,7 +87,7 @@ impl<S: Shared> Job<S> {
             completed: false,
         }
     }
-    fn get_dominant_share(&self) -> &DominantShare<S> {
+    fn get_dominant_share(&self) -> &DominantShare {
         &self.dominant_share
     }
     fn allocate_resource_for_next_task(&mut self) -> Result<(), ()> {
@@ -158,27 +95,22 @@ impl<S: Shared> Job<S> {
             Some(t) => {
                 // Increase CPU and RAM usage
                 let resource_demand = t.get_resource_demand();
-                self.cpu_usage += resource_demand.get_cpu();
-                self.ram_usage += resource_demand.get_ram();
+                self.cpu_usage += resource_demand.cpu;
+                self.ram_usage += resource_demand.mem;
 
                 // Calculate dominant share for this job
                 // TODO: Specify the type of resource
-                self.dominant_share = {
-                    let cpu_share = self.cpu_usage as f32 / self.total_cpu as f32;
-                    let ram_share = self.ram_usage as f32 / self.total_memory as f32;
-                    if cpu_share > ram_share {
-                        DominantShare::from(
-                            self.id,
-                            ResourceType::CPU(resource_demand.get_cpu().into()),
-                            cpu_share.into(),
-                        )
+                self.dominant_share = DominantShare {
+                    job_id: self.id,
+                    resource_type: if resource_demand.cpu > resource_demand.mem {
+                        ResourceType::CPU
                     } else {
-                        DominantShare::from(
-                            self.id,
-                            ResourceType::RAM(resource_demand.get_ram().into()),
-                            ram_share.into(),
-                        )
-                    }
+                        ResourceType::RAM
+                    },
+                    resource_share: f32::max(
+                        self.cpu_usage as f32 / self.total_cpu as f32,
+                        self.ram_usage as f32 / self.total_memory as f32,
+                    ),
                 };
                 Ok(())
             }
@@ -202,7 +134,7 @@ impl<S: Shared> Job<S> {
             }
         }
     }
-    fn get_next_task_resource_demand(&self) -> Option<Resource<S>> {
+    fn get_next_task_resource_demand(&self) -> Option<Resource> {
         match self.tasks.front() {
             Some(t) => Some(t.get_resource_demand()),
             None => None,
@@ -210,43 +142,43 @@ impl<S: Shared> Job<S> {
     }
 }
 
-pub struct DRF<S: Shared> {
+pub struct DRF {
     total_cpu: Core,
     total_memory: GB,
-    jobs: HashMap<JobId, Job<S>>,
-    max_dominant_share: DominantShare<S>,
+    jobs: HashMap<JobId, Job>,
+    max_dominant_share: DominantShare,
     // least_dominant_share: DominantShare,
     cpu_usage: Core,
     ram_usage: GB,
     skip_jobs: HashSet<JobId>,
 }
 
-impl<S: Shared> DRF<S> {
-    fn new(total_cpu: Core, total_memory: GB, jobs: HashMap<JobId, Job<S>>) -> Self {
+impl DRF {
+    fn new(total_cpu: Core, total_memory: GB, jobs: HashMap<JobId, Job>) -> Self {
         return DRF {
             total_cpu,
             total_memory,
             jobs,
             cpu_usage: 0,
             ram_usage: 0,
-            max_dominant_share: DominantShare::<S>::default(),
+            max_dominant_share: DominantShare::default(),
             // Jobs that are skipped due to not enough resources
             skip_jobs: HashSet::new(),
             // least_dominant_share: DominantShare(0, 0.0),
         };
     }
-    fn update_max_dominant_share(&mut self, job_id: JobId, job_dominant_share: &DominantShare<S>) {
-        if job_dominant_share.cmp(&self.max_dominant_share) == Ordering::Greater {
-            self.max_dominant_share = DominantShare::from(
-                job_id,
-                ResourceType::CPU(0.into()),
-                job_dominant_share.resource_share.clone(),
-            );
+    fn update_max_dominant_share(&mut self, job_dominant_share: &DominantShare) {
+        if job_dominant_share >= &self.max_dominant_share {
+            self.max_dominant_share = DominantShare {
+                job_id: job_dominant_share.job_id,
+                resource_type: job_dominant_share.resource_type.clone(),
+                resource_share: job_dominant_share.resource_share,
+            };
         }
     }
-    fn increment_resource_usage(&mut self, resource: Resource<S>) {
-        self.cpu_usage += resource.get_cpu();
-        self.ram_usage += resource.get_ram();
+    fn increment_resource_usage(&mut self, resource: Resource) {
+        self.cpu_usage += resource.cpu;
+        self.ram_usage += resource.mem;
     }
     fn schedule(&mut self) {
         loop {
@@ -259,21 +191,23 @@ impl<S: Shared> DRF<S> {
                     let task_resource = job.get_next_task_resource_demand();
                     match task_resource {
                         Some(resource) => {
-                            if ((self.cpu_usage + resource.get_cpu()) <= self.total_cpu)
-                                && ((self.ram_usage + resource.get_ram()) <= self.total_memory)
+                            if ((self.cpu_usage + resource.cpu) <= self.total_cpu)
+                                && ((self.ram_usage + resource.mem) <= self.total_memory)
                             {
-                                self.cpu_usage += resource.get_cpu();
-                                self.ram_usage += resource.get_ram();
+                                self.cpu_usage += resource.cpu;
+                                self.ram_usage += resource.mem;
                                 match job.allocate_resource_for_next_task() {
                                     Ok(()) => {
                                         job.run_next_task();
                                         let job_dominant_share = job.get_dominant_share();
-                                        if job_dominant_share >= &self.max_dominant_share {
-                                            self.max_dominant_share = DominantShare::from(
-                                                job.id,
-                                                job_dominant_share.resource_type.to_owned(),
-                                                job_dominant_share.resource_share.to_owned(),
-                                            );
+                                        if job_dominant_share.ge(&self.max_dominant_share) {
+                                            self.max_dominant_share = DominantShare {
+                                                job_id: job.id,
+                                                resource_type: job_dominant_share
+                                                    .resource_type
+                                                    .clone(),
+                                                resource_share: job_dominant_share.resource_share,
+                                            };
                                         }
                                         println!(
                                             "Max Dominant Share {:?}, (Job{:?}, {:?})",
@@ -319,38 +253,40 @@ impl<S: Shared> DRF<S> {
     }
 
     fn least_dominant_fair_share(&self) -> (JobId, bool) {
-        let mut least_dominant_share = self.max_dominant_share.clone();
+        let mut least_dominant_share = self.max_dominant_share.to_owned();
         let mut job_id = self.max_dominant_share.job_id;
         let mut all_dominant_fair_share_equal = true;
         let dominant_share = self.jobs.iter().next().unwrap().1.get_dominant_share();
 
-        let mut least_share = |j: &Job<S>| {
+        let mut least_share = |j: &Job| {
             let job_dominant_share = j.get_dominant_share();
-            if job_dominant_share < &least_dominant_share {
+            if job_dominant_share.lt(&least_dominant_share) {
                 job_id = j.id;
-                least_dominant_share = job_dominant_share.clone();
+                least_dominant_share = job_dominant_share.to_owned();
             }
-            all_dominant_fair_share_equal = dominant_share.eq(job_dominant_share);
+            all_dominant_fair_share_equal = dominant_share.eq(&job_dominant_share);
         };
         self.jobs.iter().for_each(|j| {
             if !self.skip_jobs.contains(&j.0) {
                 least_share(j.1)
             }
         });
+        println!("least_dominant_share: {:?}", least_dominant_share);
+        println!("job_id: {job_id}");
         (job_id, all_dominant_fair_share_equal)
     }
 }
-impl<S: Shared> Default for DominantShare<S> {
+impl Default for DominantShare {
     fn default() -> Self {
-        DominantShare::<S> {
+        DominantShare {
             job_id: 0,
-            resource_type: ResourceType::CPU(0.into()),
-            resource_share: S::from(0.0),
+            resource_type: ResourceType::CPU,
+            resource_share: 0.0,
         }
     }
 }
 // Debug Implementations
-impl<S: Shared> fmt::Debug for Job<S> {
+impl fmt::Debug for Job {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Job ID: {}\n", self.id)?;
         writeln!(f, "  Tasks Run: {} \n", self.tasks_run)?;
@@ -367,12 +303,11 @@ impl<S: Shared> fmt::Debug for Job<S> {
     }
 }
 
-impl<Args: fmt::Debug + Clone, R, S: Shared> fmt::Debug for Task<Args, R, S> {
+impl<Args: fmt::Debug + Clone, R> fmt::Debug for Task<Args, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Task")
             .field("name", &self.name)
-            .field("cpu", &self.resource_demand.get_cpu())
-            .field("memory", &self.resource_demand.get_ram())
+            .field("resource_demand", &self.resource_demand)
             .field("args", &self.args)
             .field("trigger", &"<Fn>") // Closures cannot be printed, so we use a placeholder
             .finish()
@@ -385,93 +320,83 @@ mod tests {
 
     #[test]
     fn test_schedule() {
-        // let cpu = 12;
-        // let ram = 12;
-        // let add = |(a, b): (i32, i32)| a + b;
-        // let mut job1 = Job::new(0, cpu, ram);
-        // let mut job2 = Job::new(1, cpu, ram);
+        let cpu = 12;
+        let ram = 12;
+        let add = |(a, b): (i32, i32)| a + b;
+        let mut job1 = Job::new(0, cpu, ram);
+        let mut job2 = Job::new(1, cpu, ram);
 
-        // job1.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     resource_demand: Resource::<S>::from(ResourceType::CPU(1.into()), 3.into()),
-        //     memory: 3,
-        //     args: (1, 2),
-        //     trigger: Box::new(add),
-        // }));
-        // job1.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 1,
-        //     memory: 3,
-        //     args: (4, 5),
-        //     trigger: Box::new(add),
-        // }));
-        // job1.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 1,
-        //     memory: 3,
-        //     args: (7, 8),
-        //     trigger: Box::new(add),
-        // }));
-        // job1.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 1,
-        //     memory: 3,
-        //     args: (4, 9),
-        //     trigger: Box::new(add),
-        // }));
-        // job1.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 1,
-        //     memory: 3,
-        //     args: (2, 10),
-        //     trigger: Box::new(add),
-        // }));
+        job1.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 1, mem: 3 },
+            args: (1, 2),
+            trigger: Box::new(add),
+        }));
+        job1.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 1, mem: 3 },
+            args: (4, 5),
+            trigger: Box::new(add),
+        }));
+        job1.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 1, mem: 3 },
+            args: (7, 8),
+            trigger: Box::new(add),
+        }));
+        job1.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 1, mem: 3 },
+            args: (4, 9),
+            trigger: Box::new(add),
+        }));
+        job1.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 1, mem: 3 },
+            args: (2, 10),
+            trigger: Box::new(add),
+        }));
 
-        // // Job2
-        // job2.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 2,
-        //     memory: 1,
-        //     args: (1, 2),
-        //     trigger: Box::new(add),
-        // }));
+        // Job2
+        job2.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 2, mem: 1 },
+            args: (1, 2),
+            trigger: Box::new(add),
+        }));
 
-        // job2.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 2,
-        //     memory: 1,
-        //     args: (1, 2),
-        //     trigger: Box::new(add),
-        // }));
+        job2.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 2, mem: 1 },
+            args: (1, 2),
+            trigger: Box::new(add),
+        }));
 
-        // job2.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 2,
-        //     memory: 1,
-        //     args: (1, 2),
-        //     trigger: Box::new(add),
-        // }));
+        job2.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 2, mem: 1 },
+            args: (1, 2),
+            trigger: Box::new(add),
+        }));
 
-        // job2.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 2,
-        //     memory: 1,
-        //     args: (1, 2),
-        //     trigger: Box::new(add),
-        // }));
+        job2.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 2, mem: 1 },
+            args: (1, 2),
+            trigger: Box::new(add),
+        }));
 
-        // job2.tasks.push_back(Box::new(Task {
-        //     name: "add",
-        //     cpu: 2,
-        //     memory: 1,
-        //     args: (1, 2),
-        //     trigger: Box::new(add),
-        // }));
+        job2.tasks.push_back(Box::new(Task {
+            name: "add",
+            resource_demand: Resource { cpu: 2, mem: 1 },
+            args: (1, 2),
+            trigger: Box::new(add),
+        }));
 
-        // let mut jobs = HashMap::new();
-        // jobs.insert(job1.id, job1);
-        // jobs.insert(job2.id, job2);
-        // let mut drf = DRF::new(cpu, ram, jobs);
-        // let _ = drf.schedule();
+        let mut jobs = HashMap::new();
+        jobs.insert(job1.id, job1);
+        jobs.insert(job2.id, job2);
+        let mut drf = DRF::new(cpu, ram, jobs);
+        let _ = drf.schedule();
     }
 }
