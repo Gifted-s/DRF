@@ -99,7 +99,6 @@ impl Job {
                 self.ram_usage += resource_demand.mem;
 
                 // Calculate dominant share for this job
-                // TODO: Specify the type of resource
                 self.dominant_share = DominantShare {
                     job_id: self.id,
                     resource_type: if resource_demand.cpu > resource_demand.mem {
@@ -220,7 +219,6 @@ impl DRF {
                                         );
                                     }
                                     Err(()) => {
-                                        // TODO: Handle this later
                                         continue;
                                     }
                                 }
